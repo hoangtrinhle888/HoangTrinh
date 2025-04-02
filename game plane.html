@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Three.js Flight Sim - Combat Enhanced (Fixed)</title>
+    <style>
+        /* --- CSS Styles (không thay đổi so với phiên bản trước) --- */
+        body { margin: 0; overflow: hidden; background-color: #87CEEB; }
+        canvas { display: block; }
+        #info { position: absolute; top: 10px; left: 10px; color: white; font-family: sans-serif; background-color: rgba(0,0,0,0.5); padding: 10px; border-radius: 5px; z-index: 10;}
+        #healthBarsContainer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; overflow: hidden; z-index: 5; }
+        .health-bar { position: absolute; width: 60px; height: 8px; background-color: rgba(128, 128, 128, 0.7); border: 1px solid rgba(0, 0, 0, 0.8); border-radius: 2px; transform: translateX(-50%); display: none; }
+        .health-bar-fill { height: 100%; background-color: red; width: 100%; transition: width 0.1s linear; border-radius: 1px; }
+        .health-bar-fill.player { background-color: limegreen; }
+        #gameOverMessage { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: red; font-size: 48px; font-weight: bold; font-family: sans-serif; text-shadow: 2px 2px 4px black; display: none; z-index: 20; }
+        #info-title { font-weight: bold; margin-bottom: 5px;}
+        #speed-label { margin-top: 10px; }
+        #score-label { margin-top: 10px; }
+        #health-label { margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+    <div id="info">
+         <div id="info-title">Điều khiển:</div>
+         Mũi tên Lên/Xuống: Chúc/Ngẩng đầu<br>
+         Mũi tên Trái/Phải: Nghiêng cánh<br>
+         Shift: Tăng tốc<br>
+         Ctrl: Giảm tốc<br>
+         Space: Bắn<br>
+         <br>
+         <div id="speed-label">Tốc độ: <span id="speedDisplay">0</span></div>
+         <div id="health-label">Máu: <span id="healthDisplay">100</span>%</div>
+         <div id="score-label">Điểm: <span id="scoreDisplay">0</span></div>
+    </div>
+    <div id="healthBarsContainer"></div>
+    <div id="gameOverMessage">GAME OVER</div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.163.0/build/three.module.js"
+            }
+        }
+        
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+
+        let scene, camera, renderer;
+        let airplane;
+        let clock = new THREE.Clock();
+        let isGameOver = false;
+
+        // --- World settings ---
+        const clouds = [];
+        const houses = [];
+        const AREA_SIZE = 800;
+        const NUM_CLOUDS = 50;
+        const NUM_HOUSES = 100;
+        const MIN_CLOUD_ALT = 80;
+        const MAX_CLOUD_ALT = 150;
+        const GROUND_Y = -10;
+
+        // --- Flight dynamics variables ---
+        let speed = 0;
+        const minSpeed = 0.5;
+        const maxSpeed = 100;
+        const acceleration = 15.0;
+        const deceleration = 20.0;
+        const dragFactor = 0.01;
+        const pitchSpeed = 0.8;
+        const rollSpeed = 1.2;
+
+        // --- Input state ---
+        const keys = {
+            ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false,
+            ShiftLeft: false, ControlLeft: false, ShiftRight: false, ControlRight: false,
+            Space: false,
+        };
+
+        // --- Combat & Health Variables ---
+        const bullets = [];
+        const enemyBullets = [];
+        const bulletSpeed = 200;
+        const bulletLifetime = 3;
+        const BULLET_DAMAGE = 10;
+
+        const playerFireRate = 5;
+        let playerTimeSinceLastShot = 0;
+
+        const PLAYER_MAX_HEALTH = 100;
+        const ENEMY_MAX_HEALTH = 50;
+        let score = 0;
+
+        const enemies = [];
+        const NUM_ENEMIES = 8;
+        const ENEMY_SPEED_MIN = 20;
+        const ENEMY_SPEED_MAX = 45;
+        const ENEMY_TURN_RATE = 1.0;
+        const ENEMY_FIRE_RATE = 0.8;
+        const ENEMY_SHOOT_RANGE = 250;
+        const ENEMY_SHOOT_ANGLE_THRESHOLD = Math.PI / 4;
+        const ENEMY_AVOID_DISTANCE = 30;
+
+        let healthBarsContainer;
+
+        // --- Initialization ---
+        function init() {
+            console.log("Initializing game..."); // Log initialization start
+            isGameOver = false;
+            document.getElementById('gameOverMessage').style.display = 'none';
+            score = 0;
+            document.getElementById('scoreDisplay').textContent = score;
+
+            // --- Clear previous scene objects if any ---
+            if (scene) {
+                 // Remove all children from scene
+                while(scene.children.length > 0){
+                    const obj = scene.children[0];
+                    scene.remove(obj);
+                    // Optional: Dispose geometry/material if memory becomes an issue
+                    // if (obj.geometry) obj.geometry.dispose();
+                    // if (obj.material) {
+                    //     if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose());
+                    //     else obj.material.dispose();
+                    // }
+                }
+            }
+             // Clear arrays
+             bullets.length = 0;
+             enemyBullets.length = 0;
+             enemies.length = 0;
+             clouds.length = 0;
+             houses.length = 0;
+             airplane = null; // Ensure player plane is reset
+
+            healthBarsContainer = document.getElementById('healthBarsContainer');
+            if (!healthBarsContainer) {
+                 console.error("Health Bars Container not found!"); // Error if container missing
+                 return; // Stop initialization if critical element is missing
+            }
+            healthBarsContainer.innerHTML = ''; // Clear old health bars
+
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB);
+            scene.fog = new THREE.Fog(0x87CEEB, 100, AREA_SIZE * 1.2);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1500);
+            camera.position.set(0, 5, -15);
+
+            // --- Renderer setup (ensure it's added only once or handled correctly) ---
+             if (!renderer) { // Create renderer only if it doesn't exist
+                 renderer = new THREE.WebGLRenderer({ antialias: true });
+                 renderer.setSize(window.innerWidth, window.innerHeight);
+                 renderer.shadowMap.enabled = true;
+                 document.body.appendChild(renderer.domElement);
+             } else { // Reuse existing renderer, just update size
+                 renderer.setSize(window.innerWidth, window.innerHeight);
+             }
+
+
+            // Lighting
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 1.5);
+            directionalLight.position.set(100, 150, 100);
+            directionalLight.castShadow = true;
+            directionalLight.shadow.mapSize.width = 2048;
+            directionalLight.shadow.mapSize.height = 2048;
+            // ... shadow camera setup
+            directionalLight.shadow.camera.left = -AREA_SIZE / 1.5; // Wider shadow area
+            directionalLight.shadow.camera.right = AREA_SIZE / 1.5;
+            directionalLight.shadow.camera.top = AREA_SIZE / 1.5;
+            directionalLight.shadow.camera.bottom = -AREA_SIZE / 1.5;
+            scene.add(directionalLight);
+
+            // Ground
+            const groundGeometry = new THREE.PlaneGeometry(AREA_SIZE * 1.5, AREA_SIZE * 1.5);
+            const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x228B22, side: THREE.DoubleSide });
+            const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+            ground.rotation.x = -Math.PI / 2;
+            ground.position.y = GROUND_Y;
+            ground.receiveShadow = true;
+            scene.add(ground);
+
+            // Player Airplane
+            airplane = createAirplane(0xaaaaaa, 0xdddddd, 0x00ff00); // Green tail for player
+            airplane.position.y = GROUND_Y + 20;
+            airplane.userData.health = PLAYER_MAX_HEALTH;
+            airplane.userData.maxHealth = PLAYER_MAX_HEALTH;
+            airplane.userData.isPlayer = true;
+            airplane.userData.healthBar = createHealthBar(true);
+            // Check if health bar was created successfully
+             if (!airplane.userData.healthBar) {
+                console.error("Failed to create player health bar");
+             }
+            scene.add(airplane);
+            updatePlayerHealthDisplay();
+
+            // --- Clouds & Houses (Restored loops) ---
+            for (let i = 0; i < NUM_CLOUDS; i++) {
+                const cloud = createCloud();
+                cloud.position.set(
+                    (Math.random() - 0.5) * AREA_SIZE,
+                    MIN_CLOUD_ALT + Math.random() * (MAX_CLOUD_ALT - MIN_CLOUD_ALT),
+                    (Math.random() - 0.5) * AREA_SIZE
+                );
+                scene.add(cloud);
+                clouds.push(cloud);
+            }
+            for (let i = 0; i < NUM_HOUSES; i++) {
+                const house = createHouse();
+                const houseHeight = house.userData.height || 10; // Default height if missing
+                house.position.set(
+                    (Math.random() - 0.5) * (AREA_SIZE * 0.8),
+                    GROUND_Y + houseHeight / 2,
+                    (Math.random() - 0.5) * (AREA_SIZE * 0.8)
+                );
+                house.rotation.y = Math.random() * Math.PI * 2;
+                scene.add(house);
+                houses.push(house);
+            }
+
+
+            // Create Enemy Planes
+            for (let i = 0; i < NUM_ENEMIES; i++) {
+                const enemy = createAirplane(0x555555, 0x777777, 0xcc0000); // Red tail enemy
+                enemy.position.set(
+                    (Math.random() - 0.5) * AREA_SIZE * 0.7,
+                    MIN_CLOUD_ALT / 1.5 + Math.random() * (MAX_CLOUD_ALT - MIN_CLOUD_ALT / 1.5),
+                    (Math.random() - 0.5) * AREA_SIZE * 0.7
+                );
+                enemy.rotation.y = Math.random() * Math.PI * 2;
+                // Ensure userData object exists before adding properties
+                 enemy.userData = {
+                    ...enemy.userData, // Keep existing userData like gunPositions
+                    speed: ENEMY_SPEED_MIN + Math.random() * (ENEMY_SPEED_MAX - ENEMY_SPEED_MIN),
+                    boundingBox: new THREE.Box3(),
+                    health: ENEMY_MAX_HEALTH,
+                    maxHealth: ENEMY_MAX_HEALTH,
+                    timeSinceLastShot: Math.random() * (1 / ENEMY_FIRE_RATE),
+                    healthBar: createHealthBar(false)
+                };
+                 if (!enemy.userData.healthBar) {
+                    console.error(`Failed to create health bar for enemy ${i}`);
+                 }
+                scene.add(enemy);
+                enemies.push(enemy);
+            }
+
+            // --- Event Listeners (Remove previous if re-initializing? Usually handled by browser refresh) ---
+             // Consider adding checks if listeners already exist if init can be called multiple times
+            window.addEventListener('keydown', handleKeyDown);
+            window.addEventListener('keyup', handleKeyUp);
+            window.addEventListener('resize', onWindowResize);
+
+            console.log("Initialization complete.");
+            if (!clock.running) clock.start(); // Ensure clock is running
+            animate(); // Start loop
+        }
+
+        // --- Create Airplane Geometry --- (Generally OK)
+        function createAirplane(bodyColor, wingColor, tailColor) {
+            const airplaneGroup = new THREE.Group();
+            const bodyMaterial = new THREE.MeshStandardMaterial({ color: bodyColor, flatShading: true });
+            const wingMaterial = new THREE.MeshStandardMaterial({ color: wingColor, flatShading: true });
+            const tailMaterial = new THREE.MeshStandardMaterial({ color: tailColor, flatShading: true });
+
+            // Fuselage
+            const fuselageGeometry = new THREE.BoxGeometry(1, 1, 4);
+            const fuselage = new THREE.Mesh(fuselageGeometry, bodyMaterial);
+            fuselage.castShadow = true;
+            airplaneGroup.add(fuselage);
+
+            // Wing
+            const wingGeometry = new THREE.BoxGeometry(8, 0.2, 1.5);
+            const mainWing = new THREE.Mesh(wingGeometry, wingMaterial);
+            mainWing.position.y = 0.2;
+            mainWing.castShadow = true;
+            airplaneGroup.add(mainWing);
+
+            // Tail Fin
+            const tailFinGeometry = new THREE.BoxGeometry(0.2, 1.5, 0.8);
+            const tailFin = new THREE.Mesh(tailFinGeometry, tailMaterial);
+            tailFin.position.set(0, 0.75, 2.0);
+            tailFin.castShadow = true;
+            airplaneGroup.add(tailFin);
+
+            // Tail Wing
+            const tailWingGeometry = new THREE.BoxGeometry(3, 0.1, 0.6);
+            const tailWing = new THREE.Mesh(tailWingGeometry, wingMaterial);
+            tailWing.position.set(0, 0.1, 2.0);
+            tailWing.castShadow = true;
+            airplaneGroup.add(tailWing);
+
+            // Propeller
+            const propGeometry = new THREE.BoxGeometry(0.1, 1.5, 0.1);
+            const propMaterial = new THREE.MeshBasicMaterial({ color: 0x333333 });
+            const propeller = new THREE.Mesh(propGeometry, propMaterial);
+            propeller.position.z = -2.1;
+            airplaneGroup.add(propeller);
+            airplaneGroup.propeller = propeller;
+
+            // --- IMPORTANT: Initialize userData if it doesn't exist ---
+            airplaneGroup.userData = airplaneGroup.userData || {};
+            airplaneGroup.userData.gunPositions = [
+                 new THREE.Vector3(-3.5, 0.2, -1.5),
+                 new THREE.Vector3( 3.5, 0.2, -1.5)
+            ];
+
+            airplaneGroup.rotation.y = Math.PI;
+            return airplaneGroup;
+        }
+
+        // --- Create Cloud & House --- (OK)
+        function createCloud() {
+            const cloudGroup = new THREE.Group();
+             const cloudMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, flatShading: true });
+             const numSpheres = 3 + Math.floor(Math.random() * 4);
+             for (let i = 0; i < numSpheres; i++) {
+                 const sphereRadius = 5 + Math.random() * 5;
+                 const sphereGeometry = new THREE.SphereGeometry(sphereRadius, 8, 6);
+                 const sphere = new THREE.Mesh(sphereGeometry, cloudMaterial);
+                 sphere.position.set(
+                     (Math.random() - 0.5) * sphereRadius * 1.5,
+                     (Math.random() - 0.5) * sphereRadius * 0.5,
+                     (Math.random() - 0.5) * sphereRadius * 1.5
+                 );
+                 sphere.castShadow = true; // Clouds casting shadows can be expensive
+                 cloudGroup.add(sphere);
+             }
+             return cloudGroup;
+        }
+        function createHouse() {
+             const houseGroup = new THREE.Group();
+             const baseWidth = 4 + Math.random() * 4;
+             const baseDepth = baseWidth * (0.8 + Math.random() * 0.4);
+             const baseHeight = 3 + Math.random() * 3;
+             const roofHeight = baseHeight * (0.5 + Math.random() * 0.3);
+             const baseColor = new THREE.Color(Math.random() * 0.5 + 0.2, Math.random() * 0.3 + 0.1, Math.random() * 0.3 + 0.1);
+             const roofColor = new THREE.Color(Math.random() * 0.4 + 0.6, Math.random() * 0.2, Math.random() * 0.2);
+             const baseMaterial = new THREE.MeshStandardMaterial({ color: baseColor, flatShading: true });
+             const roofMaterial = new THREE.MeshStandardMaterial({ color: roofColor, flatShading: true });
+             const baseGeometry = new THREE.BoxGeometry(baseWidth, baseHeight, baseDepth);
+             const base = new THREE.Mesh(baseGeometry, baseMaterial);
+             base.castShadow = true;
+             base.receiveShadow = true;
+             houseGroup.add(base);
+             const roofGeometry = new THREE.ConeGeometry(baseWidth * 0.75, roofHeight, 4);
+             const roof = new THREE.Mesh(roofGeometry, roofMaterial);
+             roof.position.y = baseHeight / 2 + roofHeight / 2;
+             roof.rotation.y = Math.PI / 4;
+             roof.castShadow = true;
+             houseGroup.add(roof);
+             houseGroup.userData = houseGroup.userData || {}; // Ensure userData exists
+             houseGroup.userData.height = baseHeight + roofHeight;
+             return houseGroup;
+        }
+
+        // --- Bullet Geo/Mat --- (OK)
+        const playerBulletMaterial = new THREE.MeshBasicMaterial({ color: 0xffff00 });
+        const enemyBulletMaterial = new THREE.MeshBasicMaterial({ color: 0xff4500 });
+        const bulletGeometry = new THREE.SphereGeometry(0.25, 6, 4);
+
+        // --- Health Bar Creation --- (Added null check for container)
+        function createHealthBar(isPlayer) {
+            if (!healthBarsContainer) {
+                 console.error("Cannot create health bar, container not found.");
+                 return null; // Return null if container doesn't exist
+            }
+            const barDiv = document.createElement('div');
+            barDiv.className = 'health-bar';
+            const fillDiv = document.createElement('div');
+            fillDiv.className = 'health-bar-fill' + (isPlayer ? ' player' : '');
+            barDiv.appendChild(fillDiv);
+            healthBarsContainer.appendChild(barDiv);
+            return { outer: barDiv, fill: fillDiv };
+        }
+
+        // --- Firing Functions --- (Added checks for gunPositions)
+        function fireBullet() {
+            if (!airplane || playerTimeSinceLastShot < 1 / playerFireRate) return;
+            playerTimeSinceLastShot = 0;
+
+            const planeDirection = new THREE.Vector3(0, 0, 1);
+            planeDirection.applyQuaternion(airplane.quaternion).normalize();
+
+            // Check if gunPositions exist
+            if (!airplane.userData || !Array.isArray(airplane.userData.gunPositions)) {
+                 console.warn("Player gun positions not defined!");
+                 return;
+            }
+
+            airplane.userData.gunPositions.forEach(gunPosLocal => {
+                // ... (rest of bullet creation is likely OK)
+                const bullet = new THREE.Mesh(bulletGeometry, playerBulletMaterial);
+                const gunPosWorld = gunPosLocal.clone().applyMatrix4(airplane.matrixWorld);
+                bullet.position.copy(gunPosWorld);
+                bullet.userData = { // Explicitly define userData properties
+                    direction: planeDirection.clone(),
+                    creationTime: clock.elapsedTime,
+                    boundingBox: new THREE.Box3(),
+                    isPlayerBullet: true,
+                    damage: BULLET_DAMAGE
+                };
+                scene.add(bullet);
+                bullets.push(bullet);
+            });
+        }
+
+        function enemyFireBullet(enemy) {
+            // Check if enemy and its data exist
+            if (!enemy || !enemy.userData || !Array.isArray(enemy.userData.gunPositions)) {
+                console.warn("Enemy or its gun positions not defined for firing!");
+                return;
+            }
+
+            const enemyDirection = new THREE.Vector3(0, 0, 1);
+            enemyDirection.applyQuaternion(enemy.quaternion).normalize();
+
+            enemy.userData.gunPositions.forEach(gunPosLocal => {
+                // ... (rest of bullet creation)
+                const bullet = new THREE.Mesh(bulletGeometry, enemyBulletMaterial);
+                const gunPosWorld = gunPosLocal.clone().applyMatrix4(enemy.matrixWorld);
+                bullet.position.copy(gunPosWorld);
+                 bullet.userData = { // Explicitly define userData properties
+                    direction: enemyDirection.clone(),
+                    creationTime: clock.elapsedTime,
+                    boundingBox: new THREE.Box3(),
+                    isPlayerBullet: false,
+                    damage: BULLET_DAMAGE
+                };
+                scene.add(bullet);
+                enemyBullets.push(bullet);
+            });
+        }
+
+
+        // --- Event Handlers --- (OK)
+        function handleKeyDown(event) { if (isGameOver) return; if (keys.hasOwnProperty(event.code)) keys[event.code] = true; }
+        function handleKeyUp(event) { if (isGameOver) return; if (keys.hasOwnProperty(event.code)) keys[event.code] = false; }
+        function onWindowResize() {
+             if (camera && renderer) { // Check if they exist
+                 camera.aspect = window.innerWidth / window.innerHeight;
+                 camera.updateProjectionMatrix();
+                 renderer.setSize(window.innerWidth, window.innerHeight);
+             }
+        }
+
+        // --- Collision Detection & Damage --- (Added null checks, refined logic)
+        function checkCollisions(deltaTime) {
+            // --- 1. Player Bullets vs Enemies ---
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                const bullet = bullets[i];
+                 // Ensure bullet and userData exist
+                 if (!bullet || !bullet.userData) continue;
+                // It's safer to calculate BBox after potential position update in main loop
+                // bullet.userData.boundingBox.setFromObject(bullet); // Do this before checks if needed
+
+                for (let j = enemies.length - 1; j >= 0; j--) {
+                    const enemy = enemies[j];
+                    // Ensure enemy and userData exist
+                    if (!enemy || !enemy.userData) continue;
+
+                    // Optimization: Use bounding spheres for faster check?
+                    // const distanceSq = bullet.position.distanceToSquared(enemy.position);
+                    // const combinedRadiiSq = Math.pow(bulletRadius + enemyRadius, 2); // Precompute radii
+                    // if (distanceSq > combinedRadiiSq * 1.5) continue; // Wider margin
+
+                    // Use existing BBox check
+                    if (bullet.position.distanceToSquared(enemy.position) > 150) continue; // Rough distance check
+
+                    // Update boxes just before checking
+                    bullet.userData.boundingBox.setFromObject(bullet);
+                    enemy.userData.boundingBox.setFromObject(enemy);
+
+                    if (bullet.userData.boundingBox.intersectsBox(enemy.userData.boundingBox)) {
+                         // Apply Damage (ensure health exists)
+                         enemy.userData.health = (enemy.userData.health || 0) - (bullet.userData.damage || 0);
+
+                         // Remove bullet
+                         scene.remove(bullet);
+                         bullets.splice(i, 1);
+
+                        if (enemy.userData.health <= 0) {
+                            // Enemy Destroyed
+                             if (enemy.userData.healthBar && enemy.userData.healthBar.outer) {
+                                enemy.userData.healthBar.outer.remove();
+                            }
+                            scene.remove(enemy);
+                            enemies.splice(j, 1);
+                            score += 10;
+                            document.getElementById('scoreDisplay').textContent = score;
+                            // TODO: Explosion effect
+                        }
+                        // No need for 'else' for health bar update, handled by updateHealthBars()
+
+                        break; // Bullet hit, stop checking this bullet
+                    }
+                }
+            }
+
+            // --- 2. Enemy Bullets vs Player ---
+            if (!airplane || isGameOver || !airplane.userData) return; // Check airplane and its userData
+
+            // Update playerBox here for accuracy in this frame
+             const playerBox = airplane.userData.boundingBox || new THREE.Box3(); // Ensure box exists
+             playerBox.setFromObject(airplane); // Update player box
+             airplane.userData.boundingBox = playerBox; // Store updated box
+
+            for (let i = enemyBullets.length - 1; i >= 0; i--) {
+                const bullet = enemyBullets[i];
+                if (!bullet || !bullet.userData) continue;
+
+                if (bullet.position.distanceToSquared(airplane.position) > 150) continue;
+
+                bullet.userData.boundingBox.setFromObject(bullet); // Update bullet box
+
+                if (bullet.userData.boundingBox.intersectsBox(playerBox)) {
+                    // Apply Damage to Player
+                    airplane.userData.health = (airplane.userData.health || 0) - (bullet.userData.damage || 0);
+                    updatePlayerHealthDisplay();
+
+                    // Remove bullet
+                    scene.remove(bullet);
+                    enemyBullets.splice(i, 1);
+
+                    if (airplane.userData.health <= 0) {
+                        handleGameOver();
+                    }
+                    break; // Bullet hit player
+                }
+            }
+        }
+
+        // --- Game Over Handler --- (Added check for airplane existence)
+        function handleGameOver() {
+            if (isGameOver) return;
+            isGameOver = true;
+            console.log("GAME OVER");
+            const msgElement = document.getElementById('gameOverMessage');
+            if(msgElement) msgElement.style.display = 'block';
+
+            if (airplane && airplane.userData && airplane.userData.healthBar && airplane.userData.healthBar.outer) {
+                 airplane.userData.healthBar.outer.remove();
+            }
+            // Optional: Make player disappear or explode
+             // if (airplane) scene.remove(airplane); // Simple removal
+             // airplane = null; // Prevent further interaction
+        }
+
+        // --- Update Player Health UI Text --- (Added checks)
+        function updatePlayerHealthDisplay() {
+             const display = document.getElementById('healthDisplay');
+             if (!display) return; // Exit if element not found
+
+            if (airplane && airplane.userData && typeof airplane.userData.health === 'number' && airplane.userData.maxHealth > 0) {
+                const healthPercent = Math.max(0, Math.round((airplane.userData.health / airplane.userData.maxHealth) * 100));
+                display.textContent = healthPercent + "%";
+            } else {
+                 display.textContent = "0%";
+            }
+        }
+
+        // --- Project 3D to 2D --- (Refined visibility check)
+        function project3DToScreen2D(worldPosition, camera) {
+             // Ensure renderer and its domElement exist and have dimensions
+             if (!renderer || !renderer.domElement || !renderer.domElement.clientWidth || !renderer.domElement.clientHeight) {
+                 return { x: 0, y: 0, visible: false };
+             }
+            const vector = worldPosition.clone().project(camera);
+            const x = (vector.x * 0.5 + 0.5) * renderer.domElement.clientWidth;
+            const y = (vector.y * -0.5 + 0.5) * renderer.domElement.clientHeight;
+
+            // Refined visibility check: Check if z component in camera space is positive (in front)
+            // And check if NDC coordinates are within [-1, 1]
+            const posInCameraSpace = worldPosition.clone().applyMatrix4(camera.matrixWorldInverse);
+            const isInFront = posInCameraSpace.z < 0; // In Three.js camera looks down -Z
+            const onScreen = Math.abs(vector.x) <= 1 && Math.abs(vector.y) <= 1;
+
+            return { x, y, visible: isInFront && onScreen };
+        }
+
+        // --- Update Health Bar Positions --- (Added more null/undefined checks)
+        function updateHealthBars() {
+            if (!healthBarsContainer) return; // Need the container
+            const healthBarYOffset = 20;
+
+            // Player
+            if (airplane && airplane.userData && airplane.userData.healthBar && airplane.userData.healthBar.outer) {
+                const bar = airplane.userData.healthBar;
+                const screenPos = project3DToScreen2D(airplane.position, camera);
+                 // Check health is positive *before* trying to display
+                 const isAlive = airplane.userData.health > 0;
+
+                if (screenPos.visible && isAlive) {
+                    bar.outer.style.display = 'block';
+                    bar.outer.style.left = `${screenPos.x}px`;
+                    bar.outer.style.top = `${screenPos.y - healthBarYOffset}px`;
+                     // Ensure maxHealth is positive to avoid NaN
+                     const maxHealth = airplane.userData.maxHealth || PLAYER_MAX_HEALTH;
+                     const healthPercent = Math.max(0, airplane.userData.health / (maxHealth > 0 ? maxHealth : 1));
+                     if (bar.fill) bar.fill.style.width = `${healthPercent * 100}%`;
+                } else {
+                    bar.outer.style.display = 'none';
+                }
+            }
+
+            // Enemies
+            enemies.forEach(enemy => {
+                if (enemy && enemy.userData && enemy.userData.healthBar && enemy.userData.healthBar.outer) {
+                     const bar = enemy.userData.healthBar;
+                     const screenPos = project3DToScreen2D(enemy.position, camera);
+                     const isAlive = enemy.userData.health > 0; // Check if enemy is alive
+
+                    if (screenPos.visible && isAlive) {
+                        bar.outer.style.display = 'block';
+                        bar.outer.style.left = `${screenPos.x}px`;
+                        bar.outer.style.top = `${screenPos.y - healthBarYOffset}px`;
+                        const maxHealth = enemy.userData.maxHealth || ENEMY_MAX_HEALTH;
+                        const healthPercent = Math.max(0, enemy.userData.health / (maxHealth > 0 ? maxHealth : 1));
+                        if (bar.fill) bar.fill.style.width = `${healthPercent * 100}%`;
+                    } else {
+                        bar.outer.style.display = 'none';
+                    }
+                }
+            });
+        }
+
+
+        // --- Main Update Function --- (Fixed AI vector calculation order)
+        function update(deltaTime) {
+            if (isGameOver) return; // Stop updates if game over
+
+            // --- 1. Player Update ---
+            if (airplane && airplane.userData) { // Ensure airplane and userData exist
+                playerTimeSinceLastShot += deltaTime;
+                // ... Player Speed/Rotation/Movement logic (mostly OK) ...
+                 let isAccelerating = keys.ShiftLeft || keys.ShiftRight;
+                 let isDecelerating = keys.ControlLeft || keys.ControlRight;
+                 if (isAccelerating) speed += acceleration * deltaTime;
+                 else if (isDecelerating) speed -= deceleration * deltaTime;
+                 else speed -= speed * dragFactor * deltaTime;
+                 speed = Math.max(minSpeed, Math.min(speed, maxSpeed));
+                 document.getElementById('speedDisplay').textContent = speed.toFixed(1);
+
+                 if (keys.ArrowUp) airplane.rotateX(pitchSpeed * deltaTime);
+                 if (keys.ArrowDown) airplane.rotateX(-pitchSpeed * deltaTime);
+                 if (keys.ArrowLeft) airplane.rotateZ(rollSpeed * deltaTime);
+                 if (keys.ArrowRight) airplane.rotateZ(-rollSpeed * deltaTime);
+
+                 const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(airplane.quaternion);
+                 airplane.position.add(forward.multiplyScalar(speed * deltaTime));
+
+                 if (airplane.propeller) airplane.propeller.rotation.z += speed * 0.5 * deltaTime;
+
+                 const groundCollisionY = GROUND_Y + 1;
+                 if (airplane.position.y < groundCollisionY) {
+                      airplane.position.y = groundCollisionY;
+                      speed *= 0.8;
+                      airplane.rotation.z *= (1 - deltaTime * 2);
+                      airplane.rotation.x *= (1 - deltaTime * 2);
+                  }
+
+                 if (keys.Space) fireBullet();
+            }
+
+            // --- 2. Update Bullets (Player & Enemy) ---
+            const currentTime = clock.elapsedTime;
+            [bullets, enemyBullets].forEach(bulletArray => {
+                for (let i = bulletArray.length - 1; i >= 0; i--) {
+                    const bullet = bulletArray[i];
+                     if (!bullet || !bullet.userData || !bullet.userData.direction) { // Check existence
+                         bulletArray.splice(i, 1); // Remove invalid bullet
+                         continue;
+                     }
+                    bullet.position.add(bullet.userData.direction.clone().multiplyScalar(bulletSpeed * deltaTime));
+                    if (currentTime - bullet.userData.creationTime > bulletLifetime || bullet.position.y < GROUND_Y) {
+                        scene.remove(bullet);
+                        bulletArray.splice(i, 1);
+                    }
+                }
+            });
+
+            // --- 3. Update Enemies (AI, Movement, Shooting) ---
+            // --- Temp vectors/quats to avoid allocations in loop ---
+             const enemyForward = new THREE.Vector3();
+             const directionToPlayer = new THREE.Vector3();
+             const currentRotation = new THREE.Quaternion();
+             const desiredRotation = new THREE.Quaternion();
+             const playerPosition = airplane ? airplane.position : null; // Null if player destroyed
+
+            for (let i = enemies.length - 1; i >= 0; i--) {
+                 const enemy = enemies[i];
+                 if (!enemy || !enemy.userData) continue; // Skip if enemy invalid
+
+                 const enemySpeed = enemy.userData.speed || ENEMY_SPEED_MIN; // Default speed
+                 enemy.userData.timeSinceLastShot += deltaTime;
+
+                 // --- AI Steering ---
+                 if (playerPosition) { // Only steer if player exists
+                    directionToPlayer.subVectors(playerPosition, enemy.position); // Vector from enemy to player
+                    const distanceToPlayerSq = directionToPlayer.lengthSq(); // Use squared distance for comparisons
+
+                    if (distanceToPlayerSq > 0.01) { // Avoid normalizing zero vector
+                        directionToPlayer.normalize();
+
+                        // Get current rotation and forward vector *after* potential updates
+                        currentRotation.copy(enemy.quaternion);
+                        enemyForward.set(0, 0, 1).applyQuaternion(currentRotation);
+
+                        let targetDirection = directionToPlayer; // Default: chase
+
+                        // Basic avoidance
+                        if (distanceToPlayerSq < ENEMY_AVOID_DISTANCE * ENEMY_AVOID_DISTANCE) {
+                             // Aim slightly away - simple negation might cause head-on passes
+                             // A better approach might be to steer perpendicular to player direction
+                            targetDirection = directionToPlayer.clone().negate(); // Simple avoidance for now
+                        }
+
+                        // Calculate desired rotation ONLY if target is different from current forward
+                        if (enemyForward.dot(targetDirection) < 0.999) { // Avoid issues when already aligned
+                            desiredRotation.setFromUnitVectors(enemyForward, targetDirection);
+                            const step = ENEMY_TURN_RATE * deltaTime;
+                             // Apply partial rotation
+                            currentRotation.rotateTowards(desiredRotation, step);
+                            enemy.quaternion.copy(currentRotation); // Apply the updated rotation
+                        }
+                    }
+                 }
+
+                 // Apply Movement along NEW forward direction
+                 enemyForward.set(0, 0, 1).applyQuaternion(enemy.quaternion); // Recalculate forward vector AFTER rotation change
+                 enemy.position.add(enemyForward.clone().multiplyScalar(enemySpeed * deltaTime));
+
+                 // Ground/Ceiling Avoidance
+                 if (enemy.position.y < GROUND_Y + 5) enemy.position.y = GROUND_Y + 5;
+                 if (enemy.position.y > MAX_CLOUD_ALT + 50) enemy.position.y = MAX_CLOUD_ALT + 50;
+
+                 // --- AI Shooting ---
+                 if (playerPosition) {
+                    const distanceToPlayer = Math.sqrt(directionToPlayer.lengthSq()); // Use already calculated squared distance
+                    if (distanceToPlayer < ENEMY_SHOOT_RANGE && enemy.userData.timeSinceLastShot >= 1 / ENEMY_FIRE_RATE) {
+                         // Use the CORRECT enemyForward vector (calculated after rotation update)
+                         const dotProduct = enemyForward.dot(directionToPlayer); // directionToPlayer is already normalized
+                         if (dotProduct > Math.cos(ENEMY_SHOOT_ANGLE_THRESHOLD)) {
+                             enemyFireBullet(enemy);
+                             enemy.userData.timeSinceLastShot = 0;
+                         }
+                     }
+                 }
+
+                 // Propeller
+                 if (enemy.propeller) enemy.propeller.rotation.z += enemySpeed * 0.5 * deltaTime;
+            }
+
+            // --- 4. Collision Checks ---
+            checkCollisions(deltaTime);
+
+            // --- 5. Update Camera ---
+            if (airplane && camera) { // Check camera exists too
+                 const cameraOffset = new THREE.Vector3(0, 5, -15);
+                 const desiredCameraPosition = cameraOffset.applyQuaternion(airplane.quaternion).add(airplane.position);
+                 const smoothness = 0.05;
+                 camera.position.lerp(desiredCameraPosition, smoothness);
+                 camera.lookAt(airplane.position);
+            }
+
+            // --- 6. Update Health Bars ---
+             updateHealthBars();
+        }
+
+        // --- Animation Loop ---
+         let animationFrameId = null; // To potentially stop the loop
+        function animate() {
+             animationFrameId = requestAnimationFrame(animate); // Store frame ID
+             // Ensure clock is running, get delta, cap it
+             if (!clock.running) clock.start();
+             const deltaTime = Math.min(clock.getDelta(), 0.05);
+
+            // Only update and render if not paused or stopped
+            if (renderer && scene && camera) { // Ensure core components exist
+                 update(deltaTime);
+                 renderer.render(scene, camera);
+            } else {
+                console.error("Render components missing, stopping animation.");
+                 if (animationFrameId !== null) cancelAnimationFrame(animationFrameId);
+                 animationFrameId = null;
+            }
+            // Check if we should stop the loop externally (e.g., game paused state)
+             // if (shouldStopGameLoop) {
+             //    cancelAnimationFrame(animationFrameId);
+             // }
+        }
+
+        // --- Start ---
+        init();
+        
+
+    </script>
+</body>
+</html>
